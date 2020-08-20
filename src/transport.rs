@@ -9,9 +9,16 @@ use futures::future::{self, Either, FutureExt, TryFutureExt};
 use futures::sink::SinkExt;
 use futures::stream::{self, Empty, Stream, StreamExt};
 use log::error;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::codec::{FramedRead, FramedWrite};
 use tower_service::Service;
+
+#[cfg(feature = "runtime-independent")]
+use futures::io::{AsyncRead, AsyncWrite};
+#[cfg(feature = "runtime-independent")]
+use futures_codec::{FramedRead, FramedWrite};
+#[cfg(not(feature = "runtime-independent"))]
+use tokio::io::{AsyncRead, AsyncWrite};
+#[cfg(not(feature = "runtime-independent"))]
+use tokio_util::codec::{FramedRead, FramedWrite};
 
 use super::codec::LanguageServerCodec;
 use super::jsonrpc::{self, Incoming, Outgoing, Response};
@@ -163,6 +170,9 @@ impl Stream for Nothing {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "runtime-independent")]
+    use futures::io::Cursor;
+    #[cfg(not(feature = "runtime-independent"))]
     use std::io::Cursor;
 
     use futures::future::Ready;
