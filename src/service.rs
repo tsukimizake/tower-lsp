@@ -15,7 +15,7 @@ use tower_service::Service;
 
 use super::client::Client;
 use super::jsonrpc::{ClientRequests, Incoming, Outgoing, ServerRequests};
-use super::{generated_impl, LanguageServer, ServerState, State};
+use super::{LanguageServer, ServerState, State};
 
 /// Error that occurs when attempting to call the language server after it has already exited.
 #[derive(Clone, Debug, PartialEq)]
@@ -119,12 +119,7 @@ impl Service<Incoming> for LspService {
             future::err(ExitedError).boxed()
         } else {
             match request {
-                Incoming::Request(req) => generated_impl::handle_request(
-                    self.server.clone(),
-                    &self.state,
-                    &self.pending_server,
-                    req,
-                ),
+                Incoming::Request(req) => unimplemented!(),
                 Incoming::Response(res) => {
                     trace!("received client response: {:?}", res);
                     self.pending_client.insert(res);

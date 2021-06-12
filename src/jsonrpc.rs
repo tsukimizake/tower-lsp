@@ -1,7 +1,6 @@
 //! A subset of JSON-RPC types used by the Language Server Protocol.
 
 pub use self::error::{Error, ErrorCode};
-pub use crate::generated_impl::ServerRequest;
 
 pub(crate) use self::pending::{ClientRequests, ServerRequests};
 
@@ -9,7 +8,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Debug, Display, Formatter};
 
 use lsp_types::notification::Notification;
-use lsp_types::request::Request;
+use lsp_types::request::Request as RequestTrait;
 use lsp_types::NumberOrString;
 use serde::de::{self, Deserializer};
 use serde::ser::Serializer;
@@ -65,6 +64,77 @@ impl From<NumberOrString> for Id {
     }
 }
 
+/// A JSON-RPC request or notification.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct Request {
+    jsonrpc: Version,
+    method: Cow<'static, str>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    params: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<Id>,
+}
+
+impl Request {
+    /// Constructs a JSON-RPC request from its corresponding LSP type.
+    pub(crate) fn request<R: RequestTrait>(id: u32, params: R::Params) -> Self {
+        // Since `R::Params` come from the `lsp-types` crate and validity is enforced via the
+        // `Request` trait, the `unwrap()` call below should never fail.
+        Request {
+            jsonrpc: Version,
+            method: R::METHOD.into(),
+            params: Some(serde_json::to_value(params).unwrap()),
+            id: Some(Id::Number(id as i64)),
+        }
+    }
+
+    /// Constructs a JSON-RPC notification from its corresponding LSP type.
+    pub(crate) fn notification<N: Notification>(params: N::Params) -> Self {
+        // Since `N::Params` comes from the `lsp-types` crate and validity is enforced via the
+        // `Notification` trait, the `unwrap()` call below should never fail.
+        Request {
+            jsonrpc: Version,
+            method: N::METHOD.into(),
+            params: Some(serde_json::to_value(params).unwrap()),
+            id: None,
+        }
+    }
+
+    /// Returns the name of the method to be invoked.
+    #[inline]
+    pub fn method(&self) -> &str {
+        self.method.as_ref()
+    }
+
+    /// Returns the unique ID of this request, if present.
+    #[inline]
+    pub fn id(&self) -> Option<&Id> {
+        self.id.as_ref()
+    }
+
+    /// Splits this request into a request ID paired with the `params` field, if present.
+    #[inline]
+    pub fn into_parts(self) -> (Option<Id>, Option<Value>) {
+        (self.id, self.params)
+    }
+}
+
+impl Display for Request {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut w = WriterFormatter { inner: f };
+        serde_json::to_writer(&mut w, self).map_err(|_| fmt::Error)
+    }
+}
+
+fn deserialize_some<'de, T, D>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 /// A successful or failed JSON-RPC response.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Response {
@@ -96,7 +166,6 @@ impl Response {
     }
 
     /// Creates a new response from a request ID and either an `Ok(Value)` or `Err(Error)` body.
-    #[inline]
     pub fn from_parts(id: Id, body: Result<Value>) -> Self {
         match body {
             Ok(result) => Response::ok(id, result),
@@ -106,7 +175,6 @@ impl Response {
 
     /// Splits the response into a request ID paired with either an `Ok(Value)` or `Err(Error)` to
     /// signify whether the response is a success or failure.
-    #[inline]
     pub fn into_parts(self) -> (Id, Result<Value>) {
         match self.kind {
             ResponseKind::Ok { result } => (self.id, Ok(result)),
@@ -122,7 +190,6 @@ impl Response {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 #[serde(untagged)]
 enum ResponseKind {
     Ok { result: Value },
@@ -137,61 +204,7 @@ pub enum Incoming {
     /// Response to a server-to-client request.
     Response(Response),
     /// Request intended for the language server.
-    Request(ServerRequest),
-}
-
-/// A server-to-client LSP request.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[cfg_attr(test, derive(Deserialize))]
-pub struct ClientRequest {
-    jsonrpc: Version,
-    method: Cow<'static, str>,
-    #[serde(flatten)]
-    kind: ClientMethod,
-}
-
-impl ClientRequest {
-    /// Constructs a JSON-RPC request from its corresponding LSP type.
-    pub(crate) fn request<R: Request>(id: u32, params: R::Params) -> Self {
-        // Since `R::Params` come from the `lsp-types` crate and validity is enforced via the
-        // `Request` trait, the `unwrap()` call below should never fail.
-        ClientRequest {
-            jsonrpc: Version,
-            method: R::METHOD.into(),
-            kind: ClientMethod::Request {
-                params: serde_json::to_value(params).unwrap(),
-                id: Id::Number(id as i64),
-            },
-        }
-    }
-
-    /// Constructs a JSON-RPC notification from its corresponding LSP type.
-    pub(crate) fn notification<N: Notification>(params: N::Params) -> Self {
-        // Since `N::Params` comes from the `lsp-types` crate and validity is enforced via the
-        // `Notification` trait, the `unwrap()` call below should never fail.
-        ClientRequest {
-            jsonrpc: Version,
-            method: N::METHOD.into(),
-            kind: ClientMethod::Notification {
-                params: serde_json::to_value(params).unwrap(),
-            },
-        }
-    }
-}
-
-impl Display for ClientRequest {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut w = WriterFormatter { inner: f };
-        serde_json::to_writer(&mut w, self).map_err(|_| fmt::Error)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[cfg_attr(test, derive(Deserialize))]
-#[serde(untagged)]
-enum ClientMethod {
-    Request { params: Value, id: Id },
-    Notification { params: Value },
+    Request(Request),
 }
 
 /// An outgoing JSON-RPC message.
@@ -202,7 +215,7 @@ pub enum Outgoing {
     /// Response to a client-to-server request.
     Response(Response),
     /// Request intended for the language client.
-    Request(ClientRequest),
+    Request(Request),
 }
 
 impl Display for Outgoing {

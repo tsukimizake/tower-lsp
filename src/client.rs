@@ -13,7 +13,9 @@ use lsp_types::*;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::jsonrpc::{self, ClientRequest, ClientRequests, Error, ErrorCode, Id, Outgoing, Result};
+use super::jsonrpc::{
+    self, ClientRequests, Error, ErrorCode, Id, Outgoing, Request as ClientRequest, Result,
+};
 use super::{ServerState, State};
 
 struct ClientInner {
