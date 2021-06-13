@@ -14,7 +14,7 @@ use log::trace;
 use tower_service::Service;
 
 use super::client::Client;
-use super::jsonrpc::{ClientRequests, Incoming, Outgoing, ServerRequests};
+use super::jsonrpc::{ClientRequests, Message, Router, ServerRequests};
 use super::{LanguageServer, ServerState, State};
 
 /// Error that occurs when attempting to call the language server after it has already exited.
@@ -32,10 +32,10 @@ impl Error for ExitedError {}
 /// Stream of messages produced by the language server.
 #[derive(Debug)]
 #[must_use = "streams do nothing unless polled"]
-pub struct MessageStream(Receiver<Outgoing>);
+pub struct MessageStream(Receiver<Message>);
 
 impl Stream for MessageStream {
-    type Item = Outgoing;
+    type Item = Message;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let recv = &mut self.as_mut().0;
@@ -68,20 +68,19 @@ impl FusedStream for MessageStream {
 /// The service shuts down and stops serving requests after the [`exit`] notification is received.
 ///
 /// [`exit`]: https://microsoft.github.io/language-server-protocol/specification#exit
-pub struct LspService {
-    server: Arc<dyn LanguageServer>,
+pub struct LspService<S> {
+    server: Router<S>,
     pending_server: ServerRequests,
     pending_client: Arc<ClientRequests>,
     state: Arc<ServerState>,
 }
 
-impl LspService {
+impl<S: LanguageServer> LspService<S> {
     /// Creates a new `LspService` with the given server backend, also returning a stream of
     /// notifications from the server back to the client.
-    pub fn new<T, F>(init: F) -> (Self, MessageStream)
+    pub fn new<F>(init: F) -> (Self, MessageStream)
     where
-        F: FnOnce(Client) -> T,
-        T: LanguageServer,
+        F: FnOnce(Client) -> S,
     {
         let state = Arc::new(ServerState::new());
         let (tx, rx) = mpsc::channel(1);
@@ -89,9 +88,10 @@ impl LspService {
 
         let pending_client = Arc::new(ClientRequests::new());
         let client = Client::new(tx, pending_client.clone(), state.clone());
+        let server = Router::new(init(client), state.clone());
 
         let service = LspService {
-            server: Arc::from(init(client)),
+            server: crate::generated::register_lsp_methods(server),
             pending_server: ServerRequests::new(),
             pending_client,
             state,
@@ -101,8 +101,8 @@ impl LspService {
     }
 }
 
-impl Service<Incoming> for LspService {
-    type Response = Option<Outgoing>;
+impl<S: LanguageServer> Service<Message> for LspService<S> {
+    type Response = Option<Message>;
     type Error = ExitedError;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
@@ -114,13 +114,17 @@ impl Service<Incoming> for LspService {
         }
     }
 
-    fn call(&mut self, request: Incoming) -> Self::Future {
+    fn call(&mut self, request: Message) -> Self::Future {
         if self.state.get() == State::Exited {
             future::err(ExitedError).boxed()
         } else {
             match request {
-                Incoming::Request(req) => unimplemented!(),
-                Incoming::Response(res) => {
+                Message::Request(req) => self
+                    .server
+                    .call(req)
+                    .map(|opt| Ok(opt.map(Message::Response)))
+                    .boxed(),
+                Message::Response(res) => {
                     trace!("received client response: {:?}", res);
                     self.pending_client.insert(res);
                     future::ok(None).boxed()
@@ -130,7 +134,7 @@ impl Service<Incoming> for LspService {
     }
 }
 
-impl Debug for LspService {
+impl<S> Debug for LspService<S> {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         f.debug_struct(stringify!(LspService))
             .field("pending_server", &self.pending_server)
@@ -179,7 +183,7 @@ mod tests {
         let (service, _) = LspService::new(|_| Mock::default());
         let mut service = Spawn::new(service);
 
-        let initialize: Incoming = serde_json::from_str(INITIALIZE_REQUEST).unwrap();
+        let initialize: Message = serde_json::from_str(INITIALIZE_REQUEST).unwrap();
         let raw = r#"{"jsonrpc":"2.0","result":{"capabilities":{}},"id":1}"#;
         let ok = serde_json::from_str(raw).unwrap();
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
@@ -196,13 +200,13 @@ mod tests {
         let (service, _) = LspService::new(|_| Mock::default());
         let mut service = Spawn::new(service);
 
-        let initialize: Incoming = serde_json::from_str(INITIALIZE_REQUEST).unwrap();
+        let initialize: Message = serde_json::from_str(INITIALIZE_REQUEST).unwrap();
         let raw = r#"{"jsonrpc":"2.0","result":{"capabilities":{}},"id":1}"#;
         let ok = serde_json::from_str(raw).unwrap();
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
         assert_eq!(service.call(initialize.clone()).await, Ok(Some(ok)));
 
-        let shutdown: Incoming = serde_json::from_str(SHUTDOWN_REQUEST).unwrap();
+        let shutdown: Message = serde_json::from_str(SHUTDOWN_REQUEST).unwrap();
         let raw = r#"{"jsonrpc":"2.0","result":null,"id":1}"#;
         let ok = serde_json::from_str(raw).unwrap();
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
@@ -219,11 +223,11 @@ mod tests {
         let (service, _) = LspService::new(|_| Mock::default());
         let mut service = Spawn::new(service);
 
-        let initialized: Incoming = serde_json::from_str(INITIALIZED_NOTIF).unwrap();
+        let initialized: Message = serde_json::from_str(INITIALIZED_NOTIF).unwrap();
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
         assert_eq!(service.call(initialized.clone()).await, Ok(None));
 
-        let exit: Incoming = serde_json::from_str(EXIT_NOTIF).unwrap();
+        let exit: Message = serde_json::from_str(EXIT_NOTIF).unwrap();
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
         assert_eq!(service.call(exit).await, Ok(None));
 
@@ -236,16 +240,16 @@ mod tests {
         let (service, _) = LspService::new(|_| Mock::default());
         let mut service = Spawn::new(service);
 
-        let initialize: Incoming = serde_json::from_str(INITIALIZE_REQUEST).unwrap();
+        let initialize: Message = serde_json::from_str(INITIALIZE_REQUEST).unwrap();
         let raw = r#"{"jsonrpc":"2.0","result":{"capabilities":{}},"id":1}"#;
         let ok = serde_json::from_str(raw).unwrap();
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
         assert_eq!(service.call(initialize.clone()).await, Ok(Some(ok)));
 
         let raw = r#"{"jsonrpc":"2.0","method":"codeAction/resolve","params":{"title":""},"id":1}"#;
-        let code_action_resolve: Incoming = serde_json::from_str(raw).unwrap();
+        let code_action_resolve: Message = serde_json::from_str(raw).unwrap();
         let raw = r#"{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"id":1}}"#;
-        let cancel_request: Incoming = serde_json::from_str(raw).unwrap();
+        let cancel_request: Message = serde_json::from_str(raw).unwrap();
 
         assert_eq!(service.poll_ready(), Poll::Ready(Ok(())));
         let pending_future = service.call(code_action_resolve);
@@ -254,7 +258,7 @@ mod tests {
 
         let (pending_response, cancel_response) = futures::join!(pending_future, cancel_future);
         let raw = r#"{"jsonrpc":"2.0","error":{"code":-32800,"message":"Canceled"},"id":1}"#;
-        let canceled: Outgoing = serde_json::from_str(raw).unwrap();
+        let canceled: Message = serde_json::from_str(raw).unwrap();
         assert_eq!(pending_response, Ok(Some(canceled)));
         assert_eq!(cancel_response, Ok(None));
     }

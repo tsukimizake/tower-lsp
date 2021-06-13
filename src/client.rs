@@ -14,12 +14,12 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::jsonrpc::{
-    self, ClientRequests, Error, ErrorCode, Id, Outgoing, Request as ClientRequest, Result,
+    self, ClientRequests, Error, ErrorCode, Id, Message, Request as ClientRequest, Result,
 };
 use super::{ServerState, State};
 
 struct ClientInner {
-    sender: Sender<Outgoing>,
+    sender: Sender<Message>,
     request_id: AtomicU32,
     pending_requests: Arc<ClientRequests>,
     state: Arc<ServerState>,
@@ -38,7 +38,7 @@ pub struct Client {
 
 impl Client {
     pub(super) fn new(
-        sender: Sender<Outgoing>,
+        sender: Sender<Message>,
         pending_requests: Arc<ClientRequests>,
         state: Arc<ServerState>,
     ) -> Self {
@@ -333,7 +333,7 @@ impl Client {
         N: Notification,
     {
         let mut sender = self.inner.sender.clone();
-        let message = Outgoing::Request(ClientRequest::notification::<N>(params));
+        let message = Message::Request(ClientRequest::notification::<N>(params));
         if sender.send(message).await.is_err() {
             error!("failed to send notification")
         }
@@ -356,7 +356,7 @@ impl Client {
         R: Request,
     {
         let id = self.inner.request_id.fetch_add(1, Ordering::Relaxed);
-        let message = Outgoing::Request(ClientRequest::request::<R>(id, params));
+        let message = Message::Request(ClientRequest::request::<R>(id, params));
 
         let response_waiter = self.inner.pending_requests.wait(Id::Number(id as i64));
 
@@ -425,7 +425,7 @@ mod tests {
         f(client).await;
 
         let messages: Vec<_> = request_rx.collect().await;
-        assert_eq!(messages, vec![Outgoing::Request(expected)]);
+        assert_eq!(messages, vec![Message::Request(expected)]);
     }
 
     #[tokio::test(flavor = "current_thread")]

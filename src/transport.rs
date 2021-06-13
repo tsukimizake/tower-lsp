@@ -14,7 +14,7 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tower_service::Service;
 
 use super::codec::LanguageServerCodec;
-use super::jsonrpc::{self, Id, Incoming, Outgoing, Response};
+use super::jsonrpc::{self, Id, Message, Response};
 
 /// Server for processing requests and responses on standard I/O or TCP.
 #[derive(Debug)]
@@ -70,12 +70,12 @@ impl<I, O, S> Server<I, O, S>
 where
     I: AsyncRead + Unpin,
     O: AsyncWrite,
-    S: Stream<Item = Outgoing>,
+    S: Stream<Item = Message>,
 {
     /// Interleaves the given stream of messages into `stdout` together with the responses.
     pub fn interleave<T>(self, stream: T) -> Server<I, O, T>
     where
-        T: Stream<Item = Outgoing>,
+        T: Stream<Item = Message>,
     {
         Server {
             stdin: self.stdin,
@@ -87,7 +87,7 @@ where
     /// Spawns the service with messages read through `stdin` and responses written to `stdout`.
     pub async fn serve<T>(self, mut service: T)
     where
-        T: Service<Incoming, Response = Option<Outgoing>> + Send + 'static,
+        T: Service<Message, Response = Option<Message>> + Send + 'static,
         T::Error: Into<Box<dyn Error + Send + Sync>>,
         T::Future: Send,
     {
@@ -110,7 +110,7 @@ where
                     Err(err) => {
                         error!("failed to decode message: {}", err);
                         let response = Response::error(Id::Null, jsonrpc::Error::parse_error());
-                        let response_fut = future::ready(Some(Outgoing::Response(response)));
+                        let response_fut = future::ready(Some(Message::Response(response)));
                         sender.send(Either::Right(response_fut)).await.unwrap();
                         continue;
                     }
@@ -144,7 +144,7 @@ fn display_sources(error: &dyn Error) -> String {
 
 #[doc(hidden)]
 #[derive(Debug)]
-pub struct Nothing(Empty<Outgoing>);
+pub struct Nothing(Empty<Message>);
 
 impl Nothing {
     fn new() -> Self {
@@ -153,7 +153,7 @@ impl Nothing {
 }
 
 impl Stream for Nothing {
-    type Item = Outgoing;
+    type Item = Message;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let stream = &mut self.as_mut().0;
@@ -176,8 +176,8 @@ mod tests {
     #[derive(Debug)]
     struct MockService;
 
-    impl Service<Incoming> for MockService {
-        type Response = Option<Outgoing>;
+    impl Service<Message> for MockService {
+        type Response = Option<Message>;
         type Error = String;
         type Future = Ready<Result<Self::Response, Self::Error>>;
 
@@ -185,9 +185,9 @@ mod tests {
             Poll::Ready(Ok(()))
         }
 
-        fn call(&mut self, _: Incoming) -> Self::Future {
+        fn call(&mut self, _: Message) -> Self::Future {
             let value = serde_json::from_str(RESPONSE).unwrap();
-            future::ok(Some(Outgoing::Response(value)))
+            future::ok(Some(Message::Response(value)))
         }
     }
 
@@ -216,7 +216,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn interleaves_messages() {
-        let message = Outgoing::Response(serde_json::from_str(RESPONSE).unwrap());
+        let message = Message::Response(serde_json::from_str(RESPONSE).unwrap());
         let messages = stream::iter(vec![message]);
 
         let (mut stdin, mut stdout) = mock_stdio();
